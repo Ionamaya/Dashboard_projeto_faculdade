@@ -3,1166 +3,1498 @@ import polars as po
 import pandas as pa
 import numpy as num
 import matplotlib.pyplot as mat
+import re
+import unicodedata
+
 from io import BytesIO as by
 
-
 # ============================================================
+
 # FUNÇÕES DE AUXÍLIO
+
 # ============================================================
 
 def coverter_numer(serie):
-    """
-    Converte uma série para números.
-    Valores que não forem numéricos são ignorados.
-    """
-    valores = pa.to_numeric(
-        serie,
-        errors="coerce"
-    )
 
-    return valores.dropna()
+          """
 
+          Converte uma série para números.
+
+          Valores que não forem numéricos são ignorados.
+
+          """
+
+          valores = pa.to_numeric(
+
+                    serie,
+
+                    errors="coerce"
+
+          )
+
+          return valores.dropna()
+
+def normalizar_texto(texto):
+
+          """Padroniza texto para comparar respostas equivalentes."""
+
+          if pa.isna(texto):
+
+                    return texto
+
+          texto = str(texto).strip().casefold()
+
+          texto = re.sub(r"\s+", " ", texto)
+
+          texto = unicodedata.normalize("NFKD", texto)
+
+          return "".join(c for c in texto if not unicodedata.combining(c))
+
+def criar_mapa_normalizacao(texto_mapeamento):
+
+          """Lê regras no formato variacao=forma_padrao."""
+
+          mapa = {}
+
+          for linha in texto_mapeamento.splitlines():
+
+                    if "=" in linha:
+
+                              origem, destino = linha.split("=", 1)
+
+                              origem, destino = normalizar_texto(origem), normalizar_texto(destino)
+
+                              if origem and destino:
+
+                                        mapa[origem] = destino
+
+          return mapa
+
+def aplicar_normalizacao(serie, mapa, ativar=True):
+
+          """Normaliza texto sem modificar respostas numéricas."""
+
+          if not ativar:
+
+                    return serie
+
+          def ajustar(valor):
+
+                    if not isinstance(valor, str):
+
+                              return valor
+
+                    texto = normalizar_texto(valor)
+
+                    if texto in mapa:
+
+                              return mapa[texto]
+
+                    for origem in sorted(mapa, key=len, reverse=True):
+
+                              texto = re.sub(r"(?<!\w)" + re.escape(origem) + r"(?!\w)", mapa[origem], texto)
+
+                    return texto
+
+          return serie.map(ajustar)
 
 def intervalo_classe(valores, numero_de_classe):
-    """
-    Cria os limites dos intervalos de classe.
-    """
-    mini = valores.min()
-    maxi = valores.max()
 
-    if mini == maxi:
-        return None
+          """
 
-    intervalos = num.linspace(
-        mini,
-        maxi,
-        numero_de_classe + 1
-    )
+          Cria os limites dos intervalos de classe.
 
-    return intervalos
+          """
 
+          mini = valores.min()
+
+          maxi = valores.max()
+
+          if mini == maxi:
+
+                    return num.array([mini - 0.5, maxi + 0.5])
+
+          intervalos = num.linspace(
+
+                    mini,
+
+                    maxi,
+
+                    numero_de_classe + 1
+
+          )
+
+          return intervalos
 
 def criar_tabela_intervalo(valores, numero_de_classe):
-    """
-    Cria uma tabela de frequência com intervalos de classe.
-    """
 
-    intervalos = intervalo_classe(
-        valores,
-        numero_de_classe
-    )
+          """
 
-    if intervalos is None:
-        return None
+          Cria uma tabela de frequência com intervalos de classe.
 
-    classe = pa.cut(
-        valores,
-        bins=intervalos,
-        include_lowest=True
-    )
+          """
 
-    frequencias = classe.value_counts(
-        sort=False
-    )
+          intervalos = intervalo_classe(
 
-    tabela = pa.DataFrame({
-        "Intervalo": frequencias.index.astype(str),
-        "Frequência": frequencias.values
-    })
+                    valores,
 
-    tabela["Frequência relativa (%)"] = (
-        tabela["Frequência"]
-        / tabela["Frequência"].sum()
-    ) * 100
+                    numero_de_classe
 
-    tabela["Frequência acumulada"] = (
-        tabela["Frequência"].cumsum()
-    )
+          )
 
-    return tabela, classe, intervalos
+          if intervalos is None:
 
+                    return None
+
+          classe = pa.cut(
+
+                    valores,
+
+                    bins=intervalos,
+
+                    include_lowest=True
+
+          )
+
+          frequencias = classe.value_counts(
+
+                    sort=False
+
+          )
+
+          tabela = pa.DataFrame({
+
+                    "Intervalo": frequencias.index.astype(str),
+
+                    "Frequência": frequencias.values
+
+          })
+
+          tabela["Ponto médio"] = (
+
+                    intervalos[:-1] + intervalos[1:]
+
+          ) / 2
+
+          tabela["Frequência relativa (%)"] = (
+
+                    tabela["Frequência"]
+
+                    / tabela["Frequência"].sum()
+
+          ) * 100
+
+          tabela["Frequência acumulada"] = (
+
+                    tabela["Frequência"].cumsum()
+
+          )
+
+          return tabela, classe, intervalos
 
 def calcular_media_intervalo(
-    valores,
-    numero_de_classe
+
+          valores,
+
+          numero_de_classe
+
 ):
-    """
-    Calcula a média aproximada utilizando
-    os pontos médios dos intervalos.
-    """
 
-    resultado = criar_tabela_intervalo(
-        valores,
-        numero_de_classe
-    )
+          """
 
-    if resultado is None:
-        return None
+          Calcula a média aproximada utilizando
 
-    tabela, classe, intervalos = resultado
+          os pontos médios dos intervalos.
 
-    pontos_medios = (
-        intervalos[:-1] +
-        intervalos[1:]
-    ) / 2
+          """
 
-    frequencias = tabela["Frequência"].values
+          resultado = criar_tabela_intervalo(
 
-    media = (
-        pontos_medios * frequencias
-    ).sum() / frequencias.sum()
+                    valores,
 
-    return media
+                    numero_de_classe
 
+          )
+
+          if resultado is None:
+
+                    return None
+
+          tabela, classe, intervalos = resultado
+
+          pontos_medios = (
+
+                    intervalos[:-1] +
+
+                    intervalos[1:]
+
+          ) / 2
+
+          frequencias = tabela["Frequência"].values
+
+          media = (
+
+                    pontos_medios * frequencias
+
+          ).sum() / frequencias.sum()
+
+          return media
 
 def calcular_mediana_intervalo(
-    valores,
-    numero_de_classe
+
+          valores,
+
+          numero_de_classe
+
 ):
-    """
-    Calcula a mediana aproximada para
-    dados agrupados em intervalos.
-    """
 
-    resultado = criar_tabela_intervalo(
-        valores,
-        numero_de_classe
-    )
+          """
 
-    if resultado is None:
-        return None
+          Calcula a mediana aproximada para
 
-    tabela, classe, intervalos = resultado
+          dados agrupados em intervalos.
 
-    frequencias = tabela["Frequência"].values
+          """
 
-    total = frequencias.sum()
+          resultado = criar_tabela_intervalo(
 
-    posicao = total / 2
+                    valores,
 
-    acumuladas = num.cumsum(
-        frequencias
-    )
+                    numero_de_classe
 
-    indice = num.where(
-        acumuladas >= posicao
-    )[0][0]
+          )
 
-    frequencia_classe = frequencias[indice]
+          if resultado is None:
 
-    acumuladas_anterior = (
-        acumuladas[indice - 1]
-        if indice > 0
-        else 0
-    )
+                    return None
 
-    limite_inferior = intervalos[indice]
+          tabela, classe, intervalos = resultado
 
-    amplitude = (
-        intervalos[indice + 1] -
-        intervalos[indice]
-    )
+          frequencias = tabela["Frequência"].values
 
-    mediana = (
-        limite_inferior +
-        (
-            (posicao - acumuladas_anterior)
-            / frequencia_classe
-        ) * amplitude
-    )
+          total = frequencias.sum()
 
-    return mediana
+          posicao = total / 2
 
+          acumuladas = num.cumsum(
+
+                    frequencias
+
+          )
+
+          indice = num.where(
+
+                    acumuladas >= posicao
+
+          )[0][0]
+
+          frequencia_classe = frequencias[indice]
+
+          acumuladas_anterior = (
+
+                    acumuladas[indice - 1]
+
+                    if indice > 0
+
+                    else 0
+
+          )
+
+          limite_inferior = intervalos[indice]
+
+          amplitude = (
+
+                    intervalos[indice + 1] -
+
+                    intervalos[indice]
+
+          )
+
+          mediana = (
+
+                    limite_inferior +
+
+                    (
+
+                              (posicao - acumuladas_anterior)
+
+                              / frequencia_classe
+
+                    ) * amplitude
+
+          )
+
+          return mediana
 
 def quartil_intervalo(
-    valores,
-    numero_de_classe,
-    quartil
+
+          valores,
+
+          numero_de_classe,
+
+          quartil
+
 ):
-    """
-    Calcula Q1, Q2 ou Q3 para dados
-    agrupados em intervalos.
-    """
 
-    resultado = criar_tabela_intervalo(
-        valores,
-        numero_de_classe
-    )
+          """
 
-    if resultado is None:
-        return None
+          Calcula Q1, Q2 ou Q3 para dados
 
-    tabela, classe, intervalos = resultado
+          agrupados em intervalos.
 
-    frequencias = tabela["Frequência"].values
+          """
 
-    total = frequencias.sum()
+          resultado = criar_tabela_intervalo(
 
-    if quartil == "Q1":
-        posicao = total / 4
+                    valores,
 
-    elif quartil == "Q2":
-        posicao = total / 2
+                    numero_de_classe
 
-    else:
-        posicao = (3 * total) / 4
+          )
 
-    acumuladas = num.cumsum(
-        frequencias
-    )
+          if resultado is None:
 
-    indice = num.where(
-        acumuladas >= posicao
-    )[0][0]
+                    return None
 
-    frequencia_classe = frequencias[indice]
+          tabela, classe, intervalos = resultado
 
-    acumuladas_anterior = (
-        acumuladas[indice - 1]
-        if indice > 0
-        else 0
-    )
+          frequencias = tabela["Frequência"].values
 
-    limite_inferior = intervalos[indice]
+          total = frequencias.sum()
 
-    amplitude = (
-        intervalos[indice + 1] -
-        intervalos[indice]
-    )
+          if quartil == "Q1":
 
-    resultado_quartil = (
-        limite_inferior +
-        (
-            (posicao - acumuladas_anterior)
-            / frequencia_classe
-        ) * amplitude
-    )
+                    posicao = total / 4
 
-    return resultado_quartil
+          elif quartil == "Q2":
 
+                    posicao = total / 2
+
+          else:
+
+                    posicao = (3 * total) / 4
+
+          acumuladas = num.cumsum(
+
+                    frequencias
+
+          )
+
+          indice = num.where(
+
+                    acumuladas >= posicao
+
+          )[0][0]
+
+          frequencia_classe = frequencias[indice]
+
+          acumuladas_anterior = (
+
+                    acumuladas[indice - 1]
+
+                    if indice > 0
+
+                    else 0
+
+          )
+
+          limite_inferior = intervalos[indice]
+
+          amplitude = (
+
+                    intervalos[indice + 1] -
+
+                    intervalos[indice]
+
+          )
+
+          resultado_quartil = (
+
+                    limite_inferior +
+
+                    (
+
+                              (posicao - acumuladas_anterior)
+
+                              / frequencia_classe
+
+                    ) * amplitude
+
+          )
+
+          return resultado_quartil
 
 def calcular_moda_intervalada(
-    valores,
-    numero_de_classe
+
+          valores,
+
+          numero_de_classe
+
 ):
-    """
-    Calcula a moda aproximada para
-    dados agrupados em intervalos.
-    """
 
-    resultado = criar_tabela_intervalo(
-        valores,
-        numero_de_classe
-    )
+          """
 
-    if resultado is None:
-        return None
+          Calcula a moda aproximada para
 
-    tabela, classe, intervalos = resultado
+          dados agrupados em intervalos.
 
-    frequencias = tabela["Frequência"].values
+          """
 
-    indice = num.argmax(
-        frequencias
-    )
+          resultado = criar_tabela_intervalo(
 
-    frequencia_modal = frequencias[indice]
+                    valores,
 
-    frequencia_anterior = (
-        frequencias[indice - 1]
-        if indice > 0
-        else 0
-    )
+                    numero_de_classe
 
-    frequencia_posterior = (
-        frequencias[indice + 1]
-        if indice < len(frequencias) - 1
-        else 0
-    )
+          )
 
-    limite_inferior = intervalos[indice]
+          if resultado is None:
 
-    amplitude = (
-        intervalos[indice + 1] -
-        intervalos[indice]
-    )
+                    return None
 
-    diferenca_anterior = (
-        frequencia_modal -
-        frequencia_anterior
-    )
+          tabela, classe, intervalos = resultado
 
-    diferenca_posterior = (
-        frequencia_modal -
-        frequencia_posterior
-    )
+          frequencias = tabela["Frequência"].values
 
-    denominador = (
-        diferenca_anterior +
-        diferenca_posterior
-    )
+          indice = num.argmax(
 
-    if denominador == 0:
-        return (
-            intervalos[indice] +
-            amplitude / 2
-        )
+                    frequencias
 
-    moda = (
-        limite_inferior +
-        (
-            diferenca_anterior /
-            denominador
-        ) * amplitude
-    )
+          )
 
-    return moda
+          frequencia_modal = frequencias[indice]
 
+          frequencia_anterior = (
+
+                    frequencias[indice - 1]
+
+                    if indice > 0
+
+                    else 0
+
+          )
+
+          frequencia_posterior = (
+
+                    frequencias[indice + 1]
+
+                    if indice < len(frequencias) - 1
+
+                    else 0
+
+          )
+
+          limite_inferior = intervalos[indice]
+
+          amplitude = (
+
+                    intervalos[indice + 1] -
+
+                    intervalos[indice]
+
+          )
+
+          diferenca_anterior = (
+
+                    frequencia_modal -
+
+                    frequencia_anterior
+
+          )
+
+          diferenca_posterior = (
+
+                    frequencia_modal -
+
+                    frequencia_posterior
+
+          )
+
+          denominador = (
+
+                    diferenca_anterior +
+
+                    diferenca_posterior
+
+          )
+
+          if denominador == 0:
+
+                    return (
+
+                              intervalos[indice] +
+
+                              amplitude / 2
+
+                    )
+
+          moda = (
+
+                    limite_inferior +
+
+                    (
+
+                              diferenca_anterior /
+
+                              denominador
+
+                    ) * amplitude
+
+          )
+
+          return moda
 
 def figura_png(fig):
-    """
-    Converte o gráfico para PNG.
-    """
 
-    imagem = by()
+          """
 
-    fig.savefig(
-        imagem,
-        format="png",
-        bbox_inches="tight"
-    )
+          Converte o gráfico para PNG.
 
-    imagem.seek(0)
+          """
 
-    return imagem
+          imagem = by()
 
+          fig.savefig(
+
+                    imagem,
+
+                    format="png",
+
+                    bbox_inches="tight"
+
+          )
+
+          imagem.seek(0)
+
+          return imagem
 
 # ============================================================
+
 # CONFIGURAÇÃO DA PÁGINA
+
 # ============================================================
 
 st.set_page_config(
-    page_title="Dashboard de Super Mercados",
-    page_icon="🗃️",
-    layout="wide"
+
+          page_title="Dashboard de Super Mercados",
+
+          page_icon="🗃️",
+
+          layout="wide"
+
 )
 
-
 # ============================================================
+
 # ENVIO DO ARQUIVO
+
 # ============================================================
 
 st.title("📊 Dashboard Estatístico - Supermercados")
 
 st.write(
-    "Envie o arquivo Excel com as respostas "
-    "do questionário para realizar as análises."
+
+          "Envie o arquivo Excel com as respostas "
+
+          "do questionário para realizar as análises."
+
 )
 
 arquivo = st.file_uploader(
-    "📁 Envie aqui o arquivo Excel escolhido para análise",
-    type=["xls", "xlsx"]
+
+          "📁 Envie aqui o arquivo Excel escolhido para análise",
+
+          type=["xls", "xlsx"]
+
 )
 
-
 # ============================================================
+
 # LEITURA DO ARQUIVO
+
 # ============================================================
 
 if arquivo is not None:
 
-    try:
+          try:
 
-        dados = po.read_excel(
-            arquivo
-        )
+                    dados = po.read_excel(
 
-        st.success(
-            "✅ Arquivo carregado com sucesso!"
-        )
+                              arquivo
 
-    except Exception as erro:
-
-        st.error(
-            f"❌ Não foi possível ler o arquivo: {erro}"
-        )
-
-        st.stop()
-
-
-    # ========================================================
-    # DADOS
-    # ========================================================
-
-    st.subheader("📋 Dados")
-
-    st.dataframe(
-        dados,
-        use_container_width=True
-    )
-
-    st.write(
-        "Quantidade de linhas:",
-        dados.height
-    )
-
-    st.write(
-        "Quantidade de colunas:",
-        dados.width
-    )
-
-
-    # ========================================================
-    # LISTA DE PERGUNTAS
-    # ========================================================
-
-    perguntas = [
-        coluna
-        for coluna in dados.columns
-        if coluna.lower()
-        not in [
-            "carimbo de data/hora",
-            "timestamp"
-        ]
-    ]
-
-
-    # ========================================================
-    # ANÁLISE DAS PERGUNTAS
-    # ========================================================
-
-    st.header(
-        "📊 Análise das perguntas"
-    )
-
-
-    for numero, pergunta in enumerate(
-        perguntas,
-        start=1
-    ):
-
-        st.divider()
-
-        st.subheader(
-            f"{numero}. {pergunta}"
-        )
-
-
-        # ====================================================
-        # MEDIDA ESTATÍSTICA
-        # ====================================================
-
-        medida = st.selectbox(
-            "📐 Medida estatística:",
-            [
-                "Moda",
-                "Média",
-                "Mediana",
-                "Quartil"
-            ],
-            key=f"medida_{numero}"
-        )
-
-
-        # ====================================================
-        # TIPO DE CÁLCULO
-        # ====================================================
-
-        tipo_calculo = st.selectbox(
-            "📊 Tipo de cálculo:",
-            [
-                "Sem intervalo de classe",
-                "Com intervalo de classe"
-            ],
-            key=f"intervalo_{numero}"
-        )
-
-
-        # ====================================================
-        # QUARTIL
-        # ====================================================
-
-        quartil = None
-
-        if medida == "Quartil":
-
-            quartil = st.selectbox(
-                "Escolha o quartil:",
-                [
-                    "Q1",
-                    "Q2",
-                    "Q3"
-                ],
-                key=f"quartil_{numero}"
-            )
-
-
-        # ====================================================
-        # NÚMERO DE CLASSES
-        # ====================================================
-
-        numero_classes = 5
-
-        if tipo_calculo == "Com intervalo de classe":
-
-            numero_classes = st.number_input(
-                "Número de classes:",
-                min_value=2,
-                max_value=20,
-                value=5,
-                step=1,
-                key=f"classes_{numero}"
-            )
-
-
-        # ====================================================
-        # ESCOLHA DO GRÁFICO
-        # ====================================================
-
-        grafico = st.selectbox(
-            "📈 Tipo de gráfico:",
-            [
-                "Gráfico de barras",
-                "Gráfico de pizza",
-                "Gráfico de pontos",
-                "Gráfico de linhas",
-                "Ogiva",
-                "Boxplot"
-            ],
-            key=f"grafico_{numero}"
-        )
-
-
-        # ====================================================
-        # BOTÃO
-        # ====================================================
-
-        gerar = st.button(
-            "🔎 Gerar análise",
-            key=f"gerar_{numero}"
-        )
-
-
-        # ====================================================
-        # GERAR ANÁLISE
-        # ====================================================
-
-        if gerar:
-
-            serie = dados[pergunta]
-
-            serie_pa = serie.to_pandas()
-
-            # Converte os dados para valores numericos antes dos calculos
-            # Isso garante que a variavel `valores` exista para todas as opcoes.
-            valores = coverter_numer(serie_pa)
-
-
-            # =================================================
-            # TABELA DE FREQUÊNCIA
-            # =================================================
-
-            frequencias = (
-                serie_pa
-                .value_counts()
-                .sort_index()
-            )
-
-            tabela_frequencia = pa.DataFrame({
-                "Resposta":
-                    frequencias.index.astype(str),
-
-                "Frequência absoluta":
-                    frequencias.values
-            })
-
-            tabela_frequencia[
-                "Frequência relativa (%)"
-            ] = (
-                tabela_frequencia[
-                    "Frequência absoluta"
-                ]
-                / len(serie_pa)
-            ) * 100
-
-
-            # =================================================
-            # RESULTADO ESTATÍSTICO
-            # =================================================
-
-            st.markdown(
-                "### 📌 Resultado estatístico"
-            )
-
-
-            # =================================================
-            # SEM INTERVALO
-            # =================================================
-
-            if tipo_calculo == "Sem intervalo de classe":
-
-
-                # ---------------------------------------------
-                # MODA
-                # ---------------------------------------------
-
-                if medida == "Moda":
-
-                    moda = (
-                        serie_pa
-                        .mode()
                     )
 
-                    if len(moda) > 0:
+                    st.success(
 
-                        st.write(
-                            "**Moda:**",
-                            ", ".join(
-                                map(
-                                    str,
-                                    moda.tolist()
-                                )
-                            )
-                        )
+                              "✅ Arquivo carregado com sucesso!"
 
-                    else:
-
-                        st.write(
-                            "Não foi possível calcular a moda."
-                        )
-
-
-                # ---------------------------------------------
-                # MÉDIA
-                # ---------------------------------------------
-
-                elif medida == "Média":
-
-                    if len(valores) == 0:
-
-                        st.warning(
-                            "A média só pode ser calculada "
-                            "com dados numéricos."
-                        )
-
-                    else:
-
-                        media = valores.mean()
-
-                        st.write(
-                            f"**Média:** {media:.2f}"
-                        )
-
-
-                # ---------------------------------------------
-                # MEDIANA
-                # ---------------------------------------------
-
-                elif medida == "Mediana":
-
-                    if len(valores) == 0:
-
-                        st.warning(
-                            "A mediana só pode ser calculada "
-                            "com dados numéricos."
-                        )
-
-                    else:
-
-                        mediana = valores.median()
-
-                        st.write(
-                            f"**Mediana:** {mediana:.2f}"
-                        )
-
-
-                # ---------------------------------------------
-                # QUARTIL
-                # ---------------------------------------------
-
-                elif medida == "Quartil":
-
-                    if len(valores) == 0:
-
-                        st.warning(
-                            "Quartis só podem ser calculados "
-                            "com dados numéricos."
-                        )
-
-                    else:
-
-                        if quartil == "Q1":
-
-                            resultado = valores.quantile(
-                                0.25
-                            )
-
-                        elif quartil == "Q2":
-
-                            resultado = valores.quantile(
-                                0.50
-                            )
-
-                        else:
-
-                            resultado = valores.quantile(
-                                0.75
-                            )
-
-                        st.write(
-                            f"**{quartil}:** "
-                            f"{resultado:.2f}"
-                        )
-
-
-            # =================================================
-            # COM INTERVALO
-            # =================================================
-
-            else:
-
-                valores = coverter_numer(
-                    serie
-                )
-
-
-                if len(valores) == 0:
-
-                    st.warning(
-                        "O intervalo de classe "
-                        "só pode ser utilizado "
-                        "com dados numéricos."
                     )
 
-                else:
+          except Exception as erro:
 
-                    tabela_intervalo = (
-                        criar_tabela_intervalo(
-                            valores,
-                            numero_classes
-                        )
+                    st.error(
+
+                              f"❌ Não foi possível ler o arquivo: {erro}"
+
                     )
 
+                    st.stop()
 
-                    if tabela_intervalo is not None:
+          # ========================================================
 
-                        (
-                            tabela_classes,
-                            classe,
-                            intervalos
-                        ) = tabela_intervalo
+          # DADOS
 
+          # ========================================================
 
-                        # -------------------------------------
-                        # MODA
-                        # -------------------------------------
+          st.subheader("📋 Dados")
 
-                        if medida == "Moda":
+          st.dataframe(
 
-                            resultado = (
-                                calcular_moda_intervalada(
-                                    valores,
-                                    numero_classes
-                                )
-                            )
+                    dados,
 
-                            if resultado is not None:
+                    use_container_width=True
 
-                                st.write(
-                                    f"**Moda aproximada:** "
-                                    f"{resultado:.2f}"
-                                )
+          )
 
+          st.write(
 
-                        # -------------------------------------
-                        # MÉDIA
-                        # -------------------------------------
+                    "Quantidade de linhas:",
 
-                        elif medida == "Média":
+                    dados.height
 
-                            resultado = (
-                                calcular_media_intervalo(
-                                    valores,
-                                    numero_classes
-                                )
-                            )
+          )
 
-                            if resultado is not None:
+          st.write(
 
-                                st.write(
-                                    f"**Média aproximada:** "
-                                    f"{resultado:.2f}"
-                                )
+                    "Quantidade de colunas:",
 
+                    dados.width
 
-                        # -------------------------------------
-                        # MEDIANA
-                        # -------------------------------------
+          )
 
-                        elif medida == "Mediana":
+          # ========================================================
 
-                            resultado = (
-                                calcular_mediana_intervalo(
-                                    valores,
-                                    numero_classes
-                                )
-                            )
+          # LISTA DE PERGUNTAS
 
-                            if resultado is not None:
+          # ========================================================
 
-                                st.write(
-                                    f"**Mediana aproximada:** "
-                                    f"{resultado:.2f}"
-                                )
+          perguntas = [
 
+                    coluna
 
-                        # -------------------------------------
-                        # QUARTIL
-                        # -------------------------------------
+                    for coluna in dados.columns
 
-                        elif medida == "Quartil":
+                    if coluna.lower()
 
-                            resultado = (
-                                quartil_intervalo(
-                                    valores,
-                                    numero_classes,
-                                    quartil
-                                )
-                            )
+                    not in [
 
-                            if resultado is not None:
+                              "carimbo de data/hora",
 
-                                st.write(
-                                    f"**{quartil} aproximado:** "
-                                    f"{resultado:.2f}"
-                                )
+                              "timestamp"
 
-
-                        # -------------------------------------
-                        # TABELA DE CLASSES
-                        # -------------------------------------
-
-                        st.markdown(
-                            "### 📋 Tabela de frequência "
-                            "com intervalo"
-                        )
-
-                        st.dataframe(
-                            tabela_classes,
-                            use_container_width=True
-                        )
-
-
-            # =================================================
-            # GRÁFICOS
-            # =================================================
-
-            st.markdown(
-                "### 📈 Gráfico"
-            )
-
-            fig, ax = mat.subplots()
-
-
-            # =================================================
-            # GRÁFICO DE BARRAS
-            # =================================================
-
-            if grafico == "Gráfico de barras":
-
-                ax.bar(
-                    tabela_frequencia[
-                        "Resposta"
-                    ],
-                    tabela_frequencia[
-                        "Frequência absoluta"
                     ]
-                )
 
-                ax.set_xlabel(
-                    "Resposta"
-                )
+          ]
 
-                ax.set_ylabel(
-                    "Frequência"
-                )
+          # ========================================================
 
-                ax.set_title(
-                    pergunta
-                )
+          # PADRONIZAÇÃO DAS RESPOSTAS TEXTUAIS
 
-                ax.tick_params(
-                    axis="x",
-                    rotation=45
-                )
+          # ========================================================
 
+          st.subheader("🧹 Padronização das respostas")
 
-            # =================================================
-            # GRÁFICO DE PIZZA
-            # =================================================
+          st.write("O filtro reúne diferenças de maiúsculas, minúsculas, acentos e espaços. Você também pode cadastrar abreviações e diminutivos.")
 
-            elif grafico == "Gráfico de pizza":
+          ativar_normalizacao = st.checkbox("Ativar padronização automática", value=True, key="ativar_normalizacao")
 
-                ax.pie(
-                    tabela_frequencia[
-                        "Frequência absoluta"
-                    ],
-                    labels=tabela_frequencia[
-                        "Resposta"
-                    ],
-                    autopct="%1.1f%%"
-                )
+          with st.expander("Configurar abreviações e diminutivos"):
 
-                ax.set_title(
-                    pergunta
-                )
+                    st.caption("Uma regra por linha: variacao=forma_padrao. Exemplo: mercadinho=supermercado. As conversões são configuráveis para evitar unir respostas com significados diferentes.")
 
+                    texto_mapeamento = st.text_area(
 
-            # =================================================
-            # GRÁFICO DE PONTOS
-            # =================================================
+                              "Regras de padronização",
 
-            elif grafico == "Gráfico de pontos":
+                              value=(
 
-                x = range(
-                    len(tabela_frequencia)
-                )
+                                        "AP. Goiania=aparecida de goiania\n"
 
-                ax.scatter(
-                    x,
-                    tabela_frequencia[
-                        "Frequência absoluta"
-                    ]
-                )
+                                        "AP Goiania=aparecida de goiania\n"
 
-                ax.set_xticks(
-                    list(x)
-                )
+                                        "Aparecida de Goiânia=aparecida de goiania\n"
 
-                ax.set_xticklabels(
-                    tabela_frequencia[
-                        "Resposta"
-                    ],
-                    rotation=45,
-                    ha="right"
-                )
+                                        "Aparecida de Goiania=aparecida de goiania\n"
 
-                ax.set_xlabel(
-                    "Resposta"
-                )
+                                        "aparecida de goiania=aparecida de goiania\n"
 
-                ax.set_ylabel(
-                    "Frequência"
-                )
+                              ),
 
-                ax.set_title(
-                    pergunta
-                )
+                              height=150,
 
+                              key="regras_normalizacao_v2"
 
-            # =================================================
-            # GRÁFICO DE LINHAS
-            # =================================================
-
-            elif grafico == "Gráfico de linhas":
-
-                ax.plot(
-                    tabela_frequencia[
-                        "Resposta"
-                    ],
-                    tabela_frequencia[
-                        "Frequência absoluta"
-                    ],
-                    marker="o"
-                )
-
-                ax.set_xlabel(
-                    "Resposta"
-                )
-
-                ax.set_ylabel(
-                    "Frequência"
-                )
-
-                ax.set_title(
-                    pergunta
-                )
-
-                ax.tick_params(
-                    axis="x",
-                    rotation=45
-                )
-
-
-            # =================================================
-            # OGIVA
-            # =================================================
-
-            elif grafico == "Ogiva":
-
-                valores = coverter_numer(
-                    serie
-                )
-
-                if len(valores) < 2:
-
-                    mat.close(fig)
-
-                    st.warning(
-                        "A ogiva precisa de pelo menos "
-                        "dois dados numéricos."
                     )
 
-                    continue
+          mapa_normalizacao = criar_mapa_normalizacao(texto_mapeamento)
 
+          # ========================================================
 
-                resultado = (
-                    criar_tabela_intervalo(
-                        valores,
-                        numero_classes
-                    )
-                )
+          # ANÁLISE DAS PERGUNTAS
 
+          # ========================================================
 
-                if resultado is not None:
+          st.header(
 
-                    (
-                        tabela_ogiva,
-                        classe,
-                        intervalos
-                    ) = resultado
+                    "📊 Análise das perguntas"
 
+          )
 
-                    frequencias_acumuladas = (
-                        tabela_ogiva[
-                            "Frequência"
-                        ].cumsum()
-                    )
+          for numero, pergunta in enumerate(
 
+                    perguntas,
 
-                    limites_superiores = (
-                        intervalos[1:]
-                    )
+                    start=1
 
+          ):
 
-                    x_ogiva = num.insert(
-                        limites_superiores,
-                        0,
-                        intervalos[0]
+                    st.divider()
+
+                    st.subheader(
+
+                              f"{numero}. {pergunta}"
+
                     )
 
+                    # ====================================================
 
-                    y_ogiva = num.insert(
-                        frequencias_acumuladas.values,
-                        0,
-                        0
+                    # MEDIDA ESTATÍSTICA
+
+                    # ====================================================
+
+                    medida = st.selectbox(
+
+                              "📐 Medida estatística:",
+
+                              [
+
+                                        "Moda",
+
+                                        "Média",
+
+                                        "Mediana",
+
+                                        "Quartil"
+
+                              ],
+
+                              key=f"medida_{numero}"
+
                     )
 
+                    # ====================================================
 
-                    ax.plot(
-                        x_ogiva,
-                        y_ogiva,
-                        marker="o"
+                    # QUARTIL
+
+                    # ====================================================
+
+                    quartil = None
+
+                    if medida == "Quartil":
+
+                              quartil = st.selectbox(
+
+                                        "Escolha o quartil:",
+
+                                        ["Q1", "Q2", "Q3"],
+
+                                        key=f"quartil_{numero}"
+
+                              )
+
+                    # ====================================================
+
+                    # ESCOLHA DO GRÁFICO
+
+                    # ====================================================
+
+                    grafico = st.selectbox(
+
+                              "📈 Tipo de gráfico:",
+
+                              [
+
+                                        "Gráfico de barras",
+
+                                        "Gráfico de pizza",
+
+                                        "Gráfico de pontos",
+
+                                        "Gráfico de linhas",
+
+                                        "Ogiva",
+
+                                        "Boxplot"
+
+                              ],
+
+                              key=f"grafico_{numero}"
+
                     )
 
-                    ax.set_xlabel(
-                        "Limite da classe"
+                    # ====================================================
+
+                    # BOTÃO
+
+                    # ====================================================
+
+                    gerar = st.button(
+
+                              "🔎 Gerar análise",
+
+                              key=f"gerar_{numero}"
+
                     )
 
-                    ax.set_ylabel(
-                        "Frequência acumulada"
-                    )
+                    # ====================================================
 
-                    ax.set_title(
-                        f"Ogiva - {pergunta}"
-                    )
+                    # GERAR ANÁLISE
 
+                    # ====================================================
 
-            # =================================================
-            # BOXPLOT
-            # =================================================
+                    if gerar:
 
-            elif grafico == "Boxplot":
+                              serie = dados[pergunta]
 
-                valores = coverter_numer(
-                    serie
-                )
+                              serie_pa = serie.to_pandas()
 
-                if len(valores) < 1:
+                              serie_pa = aplicar_normalizacao(
 
-                    mat.close(fig)
+                                        serie_pa, mapa_normalizacao, ativar_normalizacao
 
-                    st.warning(
-                        "O boxplot precisa de "
-                        "dados numéricos."
-                    )
+                              )
 
-                    continue
+                              # Converte os dados para valores numericos antes dos calculos
 
+                              # Isso garante que a variavel \\\\\\\`valores\\\\\\\` exista para todas as opcoes.
 
-                ax.boxplot(
-                    valores
-                )
+                              valores = coverter_numer(serie_pa)
 
-                ax.set_ylabel(
-                    "Valores"
-                )
+                              # Número de classes calculado automaticamente (regra de Sturges)
 
-                ax.set_title(
-                    pergunta
-                )
+                              if len(valores) >= 2:
 
+                                        numero_classes = max(
 
-            # =================================================
-            # MOSTRAR GRÁFICO
-            # =================================================
+                                                  2,
 
-            st.pyplot(
-                fig
-            )
+                                                  min(20, int(num.ceil(1 + 3.322 * num.log10(len(valores)))))
 
+                                        )
 
-            # =================================================
-            # DOWNLOAD PNG
-            # =================================================
+                              else:
 
-            imagem_png = figura_png(
-                fig
-            )
+                                        numero_classes = 2
 
-            nome_arquivo = (
-                f"grafico_{numero}.png"
-            )
+                              # =================================================
 
-            st.download_button(
-                label="⬇️ Baixar gráfico PNG",
-                data=imagem_png,
-                file_name=nome_arquivo,
-                mime="image/png",
-                key=f"download_{numero}"
-            )
+                              # =================================================
+                              # TABELA DE FREQUÊNCIA
 
+                              # =================================================
 
-            mat.close(
-                fig
-            )
+                              frequencias = (
 
+                                        serie_pa
 
-            # =================================================
-            # TABELA DE FREQUÊNCIA
-            # =================================================
+                                        .value_counts()
 
-            st.markdown(
-                "### 📋 Tabela de frequência"
-            )
+                                        .sort_index()
 
-            st.dataframe(
-                tabela_frequencia,
-                use_container_width=True
-            )
+                              )
+
+                              tabela_frequencia = pa.DataFrame({
+
+                                        "Resposta":
+
+                                                  frequencias.index.astype(str),
+
+                                        "Frequência absoluta":
+
+                                                  frequencias.values
+
+                              })
+                              tabela_frequencia = tabela_frequencia.sort_values(
+                                        by="Frequência absoluta",
+                                        ascending=True
+                              )
+
+                              tabela_frequencia[
+
+                                        "Frequência relativa (%)"
+
+                              ] = (
+
+                                        tabela_frequencia[
+
+                                                  "Frequência absoluta"
+
+                                        ]
+
+                                        / serie_pa.notna().sum()
+
+                              ) * 100
+
+                              # =================================================
+
+                              # GRÁFICOS
+
+                              # =================================================
+
+                              st.markdown(
+
+                                        "### 📈 Gráfico"
+
+                              )
+
+                              fig, ax = mat.subplots(figsize=(7, 4), dpi=100)
+
+                              # =================================================
+
+                              # GRÁFICO DE BARRAS
+
+                              # =================================================
+
+                              if grafico == "Gráfico de barras":
+
+                                        # Remove respostas vazias
+
+                                        tabela_grafico = tabela_frequencia[
+
+                                                  tabela_frequencia["Resposta"].astype(str).str.strip() != ""
+
+                                        ].copy()
+
+                                        # Ordena as frequências
+
+                                        tabela_grafico = tabela_grafico.sort_values(
+
+                                                  by="Frequência absoluta",
+
+                                                  ascending=True
+
+                                        )
+
+                                        quantidade_respostas = len(tabela_grafico)
+
+                                        # Ajusta a altura conforme a quantidade de categorias
+
+                                        altura = max(4, quantidade_respostas * 0.45)
+
+                                        fig.set_size_inches(9, altura)
+
+                                        # Cria o gráfico horizontal
+
+                                        ax.barh(
+
+                                                  tabela_grafico["Resposta"].astype(str),
+
+                                                  tabela_grafico["Frequência absoluta"]
+
+                                        )
+
+                                        ax.set_xlabel("Frequência")
+
+                                        ax.set_ylabel("Resposta")
+
+                                        ax.tick_params(
+
+                                                  axis="y",
+
+                                                  labelsize=9
+
+                                        )
+
+                                        # Calcula o espaço necessário para os nomes
+
+                                        maior_nome = max(
+
+                                                  (len(str(nome)) for nome in tabela_grafico["Resposta"]),
+
+                                                  default=10
+
+                                        )
+
+                                        margem_esquerda = min(
+
+                                                  0.65,
+
+                                                  max(0.30, maior_nome * 0.009)
+
+                                        )
+
+                                        fig.subplots_adjust(
+
+                                                  left=margem_esquerda,
+
+                                                  right=0.96,
+
+                                                  top=0.96,
+
+                                                  bottom=0.12
+
+                                        )
+
+                              # =================================================
+
+                              # GRÁFICO DE PIZZA
+
+                              # =================================================
+
+                              elif grafico == "Gráfico de pizza":
+
+                                        # Remove respostas vazias
+
+                                        tabela_grafico = tabela_frequencia[
+
+                                                  tabela_frequencia["Resposta"].astype(str).str.strip() != ""
+
+                                        ].copy()
+
+                                        fig.set_size_inches(9, 5.5)
+
+                                        # Cria o gráfico sem nomes ao redor das fatias
+
+                                        fatias, textos, porcentagens = ax.pie(
+
+                                                  tabela_grafico["Frequência absoluta"],
+
+                                                  labels=None,
+
+                                                  autopct=lambda p: f"{p:.1f}%" if p >= 3 else "",
+
+                                                  startangle=90,
+
+                                                  pctdistance=0.70,
+
+                                                  textprops={
+
+                                                            "fontsize": 9
+
+                                                  }
+
+                                        )
+
+                                        # Coloca os nomes em uma legenda separada
+
+                                        ax.legend(
+
+                                                  fatias,
+
+                                                  tabela_grafico["Resposta"].astype(str),
+
+                                                  title="Respostas",
+
+                                                  loc="center left",
+
+                                                  bbox_to_anchor=(1.02, 0.5),
+
+                                                  fontsize=8,
+
+                                                  title_fontsize=9,
+
+                                                  frameon=False
+
+                                        )
+
+                                        ax.set_aspect("equal")
+
+                                        fig.subplots_adjust(
+
+                                                  left=0.02,
+
+                                                  right=0.65,
+
+                                                  top=0.95,
+
+                                                  bottom=0.08
+
+                                        )
+
+                              # =================================================
+
+                              # GRÁFICO DE PONTOS
+
+                              # =================================================
+
+                              elif grafico == "Gráfico de pontos":
+
+                                        x = range(
+
+                                                  len(tabela_frequencia)
+
+                                        )
+
+                                        ax.scatter(
+
+                                                  x,
+
+                                                  tabela_frequencia[
+
+                                                            "Frequência absoluta"
+
+                                                  ]
+
+                                        )
+
+                                        ax.set_xticks(
+
+                                                  list(x)
+
+                                        )
+
+                                        ax.set_xticklabels(
+
+                                                  tabela_frequencia[
+
+                                                            "Resposta"
+
+                                                  ],
+
+                                                  rotation=45,
+
+                                                  ha="right"
+
+                                        )
+
+                                        ax.set_xlabel(
+
+                                                  "Resposta"
+
+                                        )
+
+                                        ax.set_ylabel(
+
+                                                  "Frequência"
+
+                                        )
+
+                              # =================================================
+
+                              # GRÁFICO DE LINHAS
+
+                              # =================================================
+
+                              elif grafico == "Gráfico de linhas":
+
+                                        ax.plot(
+
+                                                  tabela_frequencia[
+
+                                                            "Resposta"
+
+                                                  ],
+
+                                                  tabela_frequencia[
+
+                                                            "Frequência absoluta"
+
+                                                  ],
+
+                                                  marker="o"
+
+                                        )
+
+                                        ax.set_xlabel(
+
+                                                  "Resposta"
+
+                                        )
+
+                                        ax.set_ylabel(
+
+                                                  "Frequência"
+
+                                        )
+
+                                        ax.tick_params(
+
+                                                  axis="x",
+
+                                                  rotation=45
+
+                                        )
+
+                              # =================================================
+
+                              # OGIVA
+
+                              # =================================================
+
+                              elif grafico == "Ogiva":
+
+                                        valores = coverter_numer(
+
+                                                  serie_pa
+
+                                        )
+
+                                        if len(valores) < 2:
+
+                                                  mat.close(fig)
+
+                                                  st.warning(
+
+                                                            "A ogiva precisa de pelo menos "
+
+                                                            "dois dados numéricos."
+
+                                                  )
+
+                                                  continue
+
+                                        resultado = (
+
+                                                  criar_tabela_intervalo(
+
+                                                            valores,
+
+                                                            numero_classes
+
+                                                  )
+
+                                        )
+
+                                        if resultado is not None:
+
+                                                  (
+
+                                                            tabela_ogiva,
+
+                                                            classe,
+
+                                                            intervalos
+
+                                                  ) = resultado
+
+                                                  frequencias_acumuladas = (
+
+                                                            tabela_ogiva[
+
+                                                                      "Frequência"
+
+                                                            ].cumsum()
+
+                                                  )
+
+                                                  limites_superiores = (
+
+                                                            intervalos[1:]
+
+                                                  )
+
+                                                  x_ogiva = num.insert(
+
+                                                            limites_superiores,
+
+                                                            0,
+
+                                                            intervalos[0]
+
+                                                  )
+
+                                                  y_ogiva = num.insert(
+
+                                                            frequencias_acumuladas.values,
+
+                                                            0,
+
+                                                            0
+
+                                                  )
+
+                                                  ax.plot(
+
+                                                            x_ogiva,
+
+                                                            y_ogiva,
+
+                                                            marker="o"
+
+                                                  )
+
+                                                  ax.set_xlabel(
+
+                                                            "Limite da classe"
+
+                                                  )
+
+                                                  ax.set_ylabel(
+
+                                                            "Frequência acumulada"
+
+                                                  )
+
+                              # =================================================
+
+                              # BOXPLOT
+
+                              # =================================================
+
+                              elif grafico == "Boxplot":
+
+                                        valores = coverter_numer(
+
+                                                  serie_pa
+
+                                        )
+
+                                        if len(valores) < 1:
+
+                                                  mat.close(fig)
+
+                                                  st.warning(
+
+                                                            "O boxplot precisa de "
+
+                                                            "dados numéricos."
+
+                                                  )
+
+                                                  continue
+
+                                        ax.boxplot(
+
+                                                  valores
+
+                                        )
+
+                                        ax.set_ylabel(
+
+                                                  "Valores"
+
+                                        )
+
+                              # =================================================
+
+                              # MOSTRAR GRÁFICO
+
+                              # =================================================
+
+                              st.pyplot(
+
+                                        fig,
+
+                                        width=700
+
+                              )
+
+                              # =================================================
+
+                              # DOWNLOAD PNG
+
+                              # =================================================
+
+                              imagem_png = figura_png(
+
+                                        fig
+
+                              )
+
+                              nome_arquivo = (
+
+                                        f"grafico_{numero}.png"
+
+                              )
+
+                              st.download_button(
+
+                                        label="⬇️ Baixar gráfico PNG",
+
+                                        data=imagem_png,
+
+                                        file_name=nome_arquivo,
+
+                                        mime="image/png",
+
+                                        key=f"download_{numero}"
+
+                              )
+
+                              mat.close(
+
+                                        fig
+
+                              )
+
+                              # =================================================
+
+                              # RESULTADO ESTATÍSTICO
+                              # =================================================
+                              st.markdown("### 📌 Resultado estatístico")
+
+                              # A MODA é calculada pelas respostas originais,
+                              # então funciona tanto para textos quanto para números.
+                              if medida == "Moda":
+                                        frequencias_moda = serie_pa.dropna().value_counts()
+
+                                        if frequencias_moda.empty or frequencias_moda.max() == 1:
+                                                  st.write("**Moda:** Não existe moda (nenhuma resposta se repete).")
+                                        else:
+                                                  maior_frequencia = frequencias_moda.max()
+                                                  modas = frequencias_moda[frequencias_moda == maior_frequencia].index.tolist()
+                                                  resultado_moda = ", ".join(str(moda) for moda in modas)
+                                                  st.write(f"**Moda:** {resultado_moda}")
+
+                                        tabela_exibicao = tabela_frequencia
+                                        titulo_tabela = "### 📋 Tabela de frequência por resposta"
+
+                              # Média, mediana e quartis precisam de dados numéricos.
+                              else:
+                                        if len(valores) == 0:
+                                                  st.warning("Esta medida precisa de respostas numéricas. Escolha Moda para analisar respostas textuais.")
+                                                  tabela_exibicao = tabela_frequencia
+                                                  titulo_tabela = "### 📋 Tabela de frequência por resposta"
+                                        else:
+                                                  resultado_intervalo = criar_tabela_intervalo(valores, numero_classes)
+
+                                                  if resultado_intervalo is None:
+                                                            st.warning("Não foi possível formar os intervalos para estes dados.")
+                                                            tabela_exibicao = tabela_frequencia
+                                                            titulo_tabela = "### 📋 Tabela de frequência por resposta"
+                                                  else:
+                                                            tabela_classes, classe, intervalos = resultado_intervalo
+
+                                                            if medida == "Média":
+                                                                      resultado_medida = calcular_media_intervalo(valores, numero_classes)
+                                                                      nome_medida = "Média aproximada"
+                                                            elif medida == "Mediana":
+                                                                      resultado_medida = calcular_mediana_intervalo(valores, numero_classes)
+                                                                      nome_medida = "Mediana aproximada"
+                                                            else:
+                                                                      resultado_medida = quartil_intervalo(valores, numero_classes, quartil)
+                                                                      nome_medida = f"{quartil} aproximado"
+
+                                                            if resultado_medida is not None:
+                                                                      st.write(f"**{nome_medida}:** {resultado_medida:.2f}")
+
+                                                            tabela_exibicao = tabela_classes
+                                                            titulo_tabela = "### 📋 Tabela de frequência por intervalos"
+
+                              # TABELA DE FREQUÊNCIA
+
+                              # =================================================
+
+                              st.markdown(titulo_tabela)
+                              st.dataframe(
+                                        tabela_exibicao,
+                                        use_container_width=True
+                              )
 
 else:
 
-    st.info(
-        "👆 Envie um arquivo Excel para começar."
-    )
+          st.info(
+
+                    "👆 Envie um arquivo Excel para começar."
+
+          )
