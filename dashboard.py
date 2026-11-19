@@ -465,7 +465,7 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
 # ============================================================
 
 st.set_page_config(
-    page_title="Dashboard - Inotive",
+    page_title="Dashboard -Inotive",
     page_icon="🗃️",
     layout="wide",
 )
@@ -481,9 +481,9 @@ if caminho_logo:
     with col_logo:
         st.image(caminho_logo, width=180)
     with col_titulo:
-        st.title("📊 Dashboard Estatístico - Supermercados")
+        st.title("📊 Dashboard Estatístico - Inotive")
 else:
-    st.title("📊 Dashboard Estatístico - Supermercados")
+    st.title("📊 Dashboard Estatístico -Inotive")
     st.caption("ℹ️ Para exibir a logo, salve o arquivo como logo.png na mesma pasta deste dashboard.py.")
 
 st.write(
