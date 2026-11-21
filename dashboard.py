@@ -1,7 +1,7 @@
+import base64
 import os
 import re
 import unicodedata
-from io import BytesIO as by
 
 import numpy as num
 import pandas as pa
@@ -17,6 +17,14 @@ import streamlit as st
 # Coloque o arquivo da logo na MESMA PASTA deste dashboard.py,
 # com um destes nomes: logo.png, logo.jpg, logo.jpeg ou logo.webp
 NOMES_LOGO = ["logo.png", "logo.jpg", "logo.jpeg", "logo.webp"]
+
+# Logos específicas de cada tema (fundo transparente). Se não existirem,
+# o dashboard usa o logo.png comum.
+LOGO_MODO_CLARO = "logo_modo_claro.png"
+LOGO_MODO_ESCURO = "logo_modo_escuro.png"
+
+# Aparece embaixo do título, para você conferir qual arquivo está rodando.
+VERSAO_DO_DASHBOARD = "v7"
 
 
 def _versao_streamlit():
@@ -37,14 +45,50 @@ else:
 # FUNÇÕES DE AUXÍLIO
 # ============================================================
 
-def encontrar_logo():
-    """Procura o arquivo da logo ao lado deste script. Retorna o caminho ou None."""
+def tema_atual():
+    """
+    Tema ativo no navegador: "light", "dark" ou None.
+    Precisa do Streamlit 1.46 ou mais novo; em versões antigas devolve None.
+    """
+    try:
+        tipo = st.context.theme.type
+    except Exception:
+        return None
+    return tipo if tipo in ("light", "dark") else None
+
+
+def encontrar_logo(tema=None):
+    """
+    Procura a logo ao lado deste script. Retorna o caminho ou None.
+    Com tema "light" ou "dark" tenta primeiro a logo desse tema;
+    se ela não existir, usa o logo.png comum.
+    """
     pasta = os.path.dirname(os.path.abspath(__file__))
-    for nome in NOMES_LOGO:
+
+    candidatos = list(NOMES_LOGO)
+    if tema == "dark":
+        candidatos = [LOGO_MODO_ESCURO] + candidatos
+    elif tema == "light":
+        candidatos = [LOGO_MODO_CLARO] + candidatos
+
+    for nome in candidatos:
         caminho = os.path.join(pasta, nome)
         if os.path.exists(caminho):
             return caminho
     return None
+
+
+def logo_em_html(caminho, largura=150):
+    """Logo em HTML, encostada na direita da coluna."""
+    extensao = caminho.rsplit(".", 1)[-1].lower()
+    tipo = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(extensao, "png")
+    with open(caminho, "rb") as arquivo:
+        codigo = base64.b64encode(arquivo.read()).decode("ascii")
+    return (
+        '<div style="text-align:right;">'
+        f'<img src="data:image/{tipo};base64,{codigo}" width="{largura}" style="max-width:100%;height:auto;">'
+        "</div>"
+    )
 
 
 def coverter_numer(serie):
@@ -144,6 +188,39 @@ def criar_tabela_resposta(serie_pa):
     return tabela
 
 
+def classificar_moda(tabela_frequencia):
+    """
+    Descobre a(s) moda(s) e classifica a distribuição.
+    Retorna (classificacao, lista_de_modas, frequencia_da_moda).
+
+    - Amodal: nenhuma resposta se repete, ou todas têm a mesma frequência.
+    - Unimodal, Bimodal, Trimodal: 1, 2 ou 3 respostas empatadas como mais frequentes.
+    - Multimodal: 4 ou mais respostas empatadas como mais frequentes.
+    """
+    if tabela_frequencia.empty:
+        return "Sem respostas", [], 0
+
+    maior = int(tabela_frequencia["Frequência absoluta"].max())
+    modas = tabela_frequencia.loc[
+        tabela_frequencia["Frequência absoluta"] == maior, "Resposta"
+    ].tolist()
+    distintas = len(tabela_frequencia)
+
+    if maior == 1 or (distintas > 1 and len(modas) == distintas):
+        return "Amodal", [], maior
+
+    nomes = {1: "Unimodal", 2: "Bimodal", 3: "Trimodal"}
+    return nomes.get(len(modas), "Multimodal"), modas, maior
+
+
+def criar_tabela_acumulada(tabela, coluna_rotulo):
+    """
+    Tabela só com a frequência acumulada (absoluta e em %).
+    coluna_rotulo é "Resposta" (tabela por resposta) ou "Intervalo" (por intervalos).
+    """
+    return tabela[[coluna_rotulo, "Frequência acumulada", "Frequência acumulada (%)"]].copy()
+
+
 def intervalo_classe(valores, numero_de_classe):
     """Cria os limites dos intervalos de classe."""
     mini = valores.min()
@@ -153,6 +230,30 @@ def intervalo_classe(valores, numero_de_classe):
         return num.array([mini - 0.5, maxi + 0.5])
 
     return num.linspace(mini, maxi, numero_de_classe + 1)
+
+
+def formatar_numero(x):
+    """
+    Formata com 1 ou 2 casas depois da vírgula (vírgula decimal).
+    Ex.: 1.8 -> 1,8 | 2.0 -> 2,0 | 0.999 -> 1,0 | 10.25 -> 10,25
+    """
+    x = round(float(x), 2) + 0.0  # evita "-0,0"
+    texto = f"{x:.2f}"
+    if texto.endswith("0"):
+        texto = texto[:-1]
+    return texto.replace(".", ",")
+
+
+def rotulos_intervalos(intervalos):
+    """
+    Nomes dos intervalos, ex.: [1,0 ; 1,8] e (1,8 ; 2,6].
+    O primeiro é fechado nos dois lados, os demais só à direita.
+    """
+    rotulos = []
+    for i in range(len(intervalos) - 1):
+        abre = "[" if i == 0 else "("
+        rotulos.append(f"{abre}{formatar_numero(intervalos[i])} ; {formatar_numero(intervalos[i + 1])}]")
+    return rotulos
 
 
 def criar_tabela_intervalo(valores, numero_de_classe):
@@ -166,7 +267,7 @@ def criar_tabela_intervalo(valores, numero_de_classe):
     frequencias = classe.value_counts(sort=False)
 
     tabela = pa.DataFrame({
-        "Intervalo": frequencias.index.astype(str),
+        "Intervalo": rotulos_intervalos(intervalos),
         "Frequência": frequencias.values,
     })
     tabela["Ponto médio"] = (intervalos[:-1] + intervalos[1:]) / 2
@@ -261,14 +362,6 @@ def calcular_moda_intervalada(valores, numero_de_classe):
 # GRÁFICOS
 # ------------------------------------------------------------
 
-def figura_png(fig):
-    """Converte um gráfico Plotly para PNG em memória."""
-    imagem = by()
-    imagem.write(fig.to_image(format="png", scale=2))
-    imagem.seek(0)
-    return imagem
-
-
 def figura_barras_simples(tabela_grafico):
     """Gráfico de barras usado quando o gráfico escolhido não pode ser feito."""
     return px.bar(
@@ -300,6 +393,25 @@ def criar_figura(grafico, tabela_grafico, serie_pa, numero_classes):
             yaxis={"categoryorder": "array", "categoryarray": tabela_grafico["Resposta"].tolist()},
             height=max(450, len(tabela_grafico) * 38),
             margin=dict(l=20, r=45, t=65, b=40),
+        )
+
+    elif grafico == "Gráfico de colunas":
+        tabela_colunas = tabela_grafico.sort_values(by="Frequência absoluta", ascending=False)
+        fig = px.bar(
+            tabela_colunas,
+            x="Resposta",
+            y="Frequência absoluta",
+            text="Frequência absoluta",
+            title="Frequência das respostas",
+            labels={"Frequência absoluta": "Frequência", "Resposta": "Resposta"},
+            hover_data={"Frequência relativa (%)": ":.2f"},
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(
+            xaxis={"categoryorder": "array", "categoryarray": tabela_colunas["Resposta"].tolist()},
+            xaxis_tickangle=-35,
+            height=500,
+            margin=dict(l=20, r=20, t=65, b=90),
         )
 
     elif grafico == "Gráfico de pizza":
@@ -409,28 +521,38 @@ def criar_figura(grafico, tabela_grafico, serie_pa, numero_classes):
 # RESULTADO ESTATÍSTICO + TABELA DE FREQUÊNCIA
 # ------------------------------------------------------------
 
-def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_frequencia):
+def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_frequencia, numero=0):
     """
     Mostra, nesta ordem:
-    1) a medida estatística escolhida e o seu resultado;
-    2) a tabela de frequência (absoluta, relativa e acumulada).
+    1) a medida estatística escolhida e o seu resultado
+       (para a moda, também a classificação: unimodal, bimodal, amodal...);
+    2) uma caixa para a pessoa escolher qual tabela quer ver;
+    3) a(s) tabela(s) escolhida(s).
+    O número da pergunta (numero) é usado para criar uma caixa de escolha por pergunta.
     """
-    tabela_exibicao = tabela_frequencia
-    titulo_tabela = "### 📋 Tabela de frequência por resposta"
+    tabela_intervalos = None
 
     st.markdown("### 📌 Resultado estatístico")
 
     if medida == "Moda":
         # A moda usa as respostas originais, então vale para texto e para número.
-        maior_frequencia = tabela_frequencia["Frequência absoluta"].max()
+        classificacao, modas, maior_frequencia = classificar_moda(tabela_frequencia)
 
-        if maior_frequencia == 1:
-            st.write("**Moda:** Não existe moda (nenhuma resposta se repete).")
+        if classificacao == "Amodal":
+            motivo = (
+                "nenhuma resposta se repete"
+                if maior_frequencia == 1
+                else "todas as respostas têm a mesma frequência"
+            )
+            st.write("**Moda:** não teve moda")
+            st.write(f"**Classificação:** Amodal ({motivo})")
         else:
-            modas = tabela_frequencia.loc[
-                tabela_frequencia["Frequência absoluta"] == maior_frequencia, "Resposta"
-            ].tolist()
             st.write(f"**Moda:** {', '.join(modas)}")
+            if len(modas) == 1:
+                detalhe = f"1 moda, com {maior_frequencia} respostas"
+            else:
+                detalhe = f"{len(modas)} modas, com {maior_frequencia} respostas cada"
+            st.write(f"**Classificação:** {classificacao} ({detalhe})")
 
     # Média, mediana e quartis precisam de dados numéricos.
     elif len(valores) == 0:
@@ -450,14 +572,54 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
         if resultado_medida is not None:
             st.write(f"**{nome_medida}:** {resultado_medida:.2f}")
 
-        # A medida foi calculada pelos intervalos, então a tabela mostra os mesmos intervalos.
-        tabela_classes = criar_tabela_intervalo(valores, numero_classes)[0]
-        tabela_exibicao = tabela_classes.rename(columns={"Frequência": "Frequência absoluta"})
-        titulo_tabela = "### 📋 Tabela de frequência por intervalos"
+    # Se existirem respostas numéricas, a tabela por intervalos também é mostrada
+    # (é ela que dá origem à média, mediana e quartis aproximados).
+    if len(valores) > 0:
+        tabela_intervalos = criar_tabela_intervalo(valores, numero_classes)[0]
+        tabela_intervalos = tabela_intervalos.rename(columns={"Frequência": "Frequência absoluta"})
 
-    st.markdown(titulo_tabela)
-    st.dataframe(tabela_exibicao.round(2), hide_index=True, **LARGURA_TOTAL)
-    st.caption(f"Total de respostas consideradas na tabela: {int(tabela_exibicao['Frequência absoluta'].sum())}")
+    # Tabelas disponíveis. As de intervalos só existem quando há respostas numéricas.
+    tabelas = [
+        (
+            "Frequência por resposta",
+            tabela_frequencia,
+            f"Total de respostas consideradas: {int(tabela_frequencia['Frequência absoluta'].sum())}",
+        ),
+        (
+            "Frequência acumulada por resposta",
+            criar_tabela_acumulada(tabela_frequencia, "Resposta"),
+            None,
+        ),
+    ]
+
+    if tabela_intervalos is not None:
+        tabelas += [
+            (
+                "Frequência por intervalos",
+                tabela_intervalos,
+                f"Total de respostas numéricas consideradas: {int(tabela_intervalos['Frequência absoluta'].sum())}",
+            ),
+            (
+                "Frequência acumulada por intervalos",
+                criar_tabela_acumulada(tabela_intervalos, "Intervalo"),
+                None,
+            ),
+        ]
+
+    opcoes = [nome for nome, _, _ in tabelas] + ["Todas as tabelas"]
+
+    escolha = st.selectbox(
+        "📋 Qual tabela você deseja ver?",
+        opcoes,
+        key=f"tabela_{numero}",
+    )
+
+    for nome, tabela, legenda in tabelas:
+        if escolha in (nome, "Todas as tabelas"):
+            st.markdown(f"### 📋 Tabela de {nome.lower()}")
+            st.dataframe(tabela.round(2), hide_index=True, **LARGURA_TOTAL)
+            if legenda:
+                st.caption(legenda)
 
 
 # ============================================================
@@ -465,7 +627,7 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
 # ============================================================
 
 st.set_page_config(
-    page_title="Dashboard -Inotive",
+    page_title="Dashboard - Inotive",
     page_icon="🗃️",
     layout="wide",
 )
@@ -474,17 +636,19 @@ st.set_page_config(
 # CABEÇALHO COM A LOGO
 # ============================================================
 
-caminho_logo = encontrar_logo()
+caminho_logo = encontrar_logo(tema_atual())
 
 if caminho_logo:
-    col_logo, col_titulo = st.columns([1, 4])
-    with col_logo:
-        st.image(caminho_logo, width=180)
+    col_titulo, col_logo = st.columns([4, 1])
     with col_titulo:
-        st.title("📊 Dashboard Estatístico - Inotive")
+        st.title("📊 Dashboard Estatístico - Supermercados")
+    with col_logo:
+        st.markdown(logo_em_html(caminho_logo), unsafe_allow_html=True)
 else:
-    st.title("📊 Dashboard Estatístico -Inotive")
+    st.title("📊 Dashboard Estatístico - Supermercados")
     st.caption("ℹ️ Para exibir a logo, salve o arquivo como logo.png na mesma pasta deste dashboard.py.")
+
+st.caption(f"Versão do dashboard: {VERSAO_DO_DASHBOARD}")
 
 st.write(
     "Envie o arquivo Excel com as respostas "
@@ -571,7 +735,10 @@ if arquivo is not None:
     for numero, pergunta in enumerate(perguntas, start=1):
 
         st.divider()
-        st.subheader(f"{numero}. {pergunta}")
+        if re.match(r"^\s*\d+\s*[.)\-]", pergunta):
+            st.subheader(pergunta)  # a pergunta já vem numerada no Excel
+        else:
+            st.subheader(f"{numero}. {pergunta}")
 
         # ----------------------------------------------------
         # MEDIDA ESTATÍSTICA
@@ -599,6 +766,7 @@ if arquivo is not None:
             "📈 Tipo de gráfico:",
             [
                 "Gráfico de barras",
+                "Gráfico de colunas",
                 "Gráfico de pizza",
                 "Gráfico de pontos",
                 "Gráfico de linhas",
@@ -665,27 +833,7 @@ if arquivo is not None:
         )
 
         # ----------------------------------------------------
-        # 2) DOWNLOAD PNG
-        # ----------------------------------------------------
-
-        try:
-            imagem_png = figura_png(fig)
-            st.download_button(
-                label="⬇️ Baixar gráfico PNG",
-                data=imagem_png,
-                file_name=f"grafico_{numero}.png",
-                mime="image/png",
-                key=f"download_{numero}",
-            )
-        except Exception as erro_png:
-            st.warning(
-                "O gráfico interativo está disponível, mas não foi possível gerar o PNG. "
-                "Verifique se a dependência kaleido está instalada. "
-                f"Detalhes: {erro_png}"
-            )
-
-        # ----------------------------------------------------
-        # 3) MEDIDA ESTATÍSTICA + 4) TABELA DE FREQUÊNCIA
+        # 2) MEDIDA ESTATÍSTICA + 3) TABELAS DE FREQUÊNCIA
         # ----------------------------------------------------
 
         mostrar_resultado_e_tabela(
@@ -694,6 +842,7 @@ if arquivo is not None:
             valores,
             numero_classes,
             tabela_frequencia,
+            numero,
         )
 
 else:
