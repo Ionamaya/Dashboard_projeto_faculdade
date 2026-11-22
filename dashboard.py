@@ -641,11 +641,11 @@ caminho_logo = encontrar_logo(tema_atual())
 if caminho_logo:
     col_titulo, col_logo = st.columns([4, 1])
     with col_titulo:
-        st.title("📊 Dashboard Estatístico - Supermercados")
+        st.title("📊 Dashboard Estatístico - Powered by 創 Inotive") 
     with col_logo:
         st.markdown(logo_em_html(caminho_logo), unsafe_allow_html=True)
 else:
-    st.title("📊 Dashboard Estatístico - Supermercados")
+    st.title("📊 Dashboard Estatístico -Powered by 創 Inotive")
     st.caption("ℹ️ Para exibir a logo, salve o arquivo como logo.png na mesma pasta deste dashboard.py.")
 
 st.caption(f"Versão do dashboard: {VERSAO_DO_DASHBOARD}")
