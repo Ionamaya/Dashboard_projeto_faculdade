@@ -146,6 +146,14 @@ def calcular_numero_classes(valores):
         return max(2, min(20, int(num.ceil(1 + 3.322 * num.log10(len(valores))))))
     return 2
 
+def abrir_analise(chave):
+    """Marca a análise da pergunta como aberta."""
+    st.session_state[chave] = True
+
+
+def fechar_analise(chave):
+    """Marca a análise da pergunta como fechada (gráfico, medida e tabelas somem)."""
+    st.session_state[chave] = False
 
 # ------------------------------------------------------------
 # TABELAS DE FREQUÊNCIA
