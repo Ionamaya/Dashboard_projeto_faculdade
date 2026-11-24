@@ -782,10 +782,27 @@ if arquivo is not None:
         # O estado fica guardado em session_state. Sem isso, qualquer clique
         # (inclusive no botão de baixar o PNG) faz a análise sumir da tela.
 
-        chave_analise = f"analise_ativa_{numero}"
+ chave_analise = f"analise_ativa_{numero}"
 
-        if st.button("🔎 Gerar análise", key=f"gerar_{numero}"):
-            st.session_state[chave_analise] = True
+        col_gerar, col_fechar, _ = st.columns([1, 1, 4])
+
+        with col_gerar:
+            st.button(
+                "🔎 Gerar análise",
+                key=f"gerar_{numero}",
+                on_click=abrir_analise,
+                args=(chave_analise,),
+            )
+
+        # O botão de fechar só aparece enquanto a análise está aberta.
+        with col_fechar:
+            if st.session_state.get(chave_analise, False):
+                st.button(
+                    "❌ Fechar análise",
+                    key=f"fechar_{numero}",
+                    on_click=fechar_analise,
+                    args=(chave_analise,),
+                )
 
         if not st.session_state.get(chave_analise, False):
             continue
