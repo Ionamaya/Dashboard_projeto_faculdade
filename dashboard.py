@@ -777,12 +777,12 @@ if arquivo is not None:
         )
 
         # ----------------------------------------------------
-        # BOTÃO
+        # BOTÕES: GERAR E FECHAR A ANÁLISE
         # ----------------------------------------------------
         # O estado fica guardado em session_state. Sem isso, qualquer clique
         # (inclusive no botão de baixar o PNG) faz a análise sumir da tela.
 
- chave_analise = f"analise_ativa_{numero}"
+        chave_analise = f"analise_ativa_{numero}"
 
         col_gerar, col_fechar, _ = st.columns([1, 1, 4])
 
@@ -806,7 +806,6 @@ if arquivo is not None:
 
         if not st.session_state.get(chave_analise, False):
             continue
-
         # ----------------------------------------------------
         # PREPARO DOS DADOS
         # ----------------------------------------------------
