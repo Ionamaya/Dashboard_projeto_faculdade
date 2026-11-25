@@ -523,7 +523,42 @@ def criar_figura(grafico, tabela_grafico, serie_pa, numero_classes):
         legend_title_text="Respostas",
     )
     return fig
+def criar_histograma(tabela_intervalos, intervalos, acumulado=False):
+    """
+    Histograma com as barras coladas, uma por intervalo de classe.
+    acumulado=False -> frequência absoluta de cada intervalo
+    acumulado=True  -> frequência acumulada
+    """
+    coluna = "Frequência acumulada" if acumulado else "Frequência absoluta"
+    titulo = "Histograma — frequência acumulada" if acumulado else "Histograma — frequência por intervalo"
+    amplitude = float(intervalos[1] - intervalos[0])
 
+    fig = go.Figure(go.Bar(
+        x=tabela_intervalos["Ponto médio"],
+        y=tabela_intervalos[coluna],
+        width=amplitude,
+        text=tabela_intervalos[coluna],
+        textposition="outside",
+        customdata=tabela_intervalos["Intervalo"],
+        hovertemplate="<b>%{customdata}</b><br>Frequência: %{y}<extra></extra>",
+        marker=dict(line=dict(width=1, color="white")),
+    ))
+    fig.update_layout(
+        title=titulo,
+        xaxis=dict(
+            title="Intervalos de classe",
+            tickmode="array",
+            tickvals=[float(v) for v in intervalos],
+            ticktext=[formatar_numero(v) for v in intervalos],
+        ),
+        yaxis_title="Frequência acumulada" if acumulado else "Frequência",
+        bargap=0,
+        height=500,
+        template="plotly_white",
+        font=dict(size=13),
+        margin=dict(l=20, r=20, t=65, b=50),
+    )
+    return fig
 
 # ------------------------------------------------------------
 # RESULTADO ESTATÍSTICO + TABELA DE FREQUÊNCIA
@@ -582,10 +617,10 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
 
     # Se existirem respostas numéricas, a tabela por intervalos também é mostrada
     # (é ela que dá origem à média, mediana e quartis aproximados).
+       intervalos_hist = None
     if len(valores) > 0:
-        tabela_intervalos = criar_tabela_intervalo(valores, numero_classes)[0]
+        tabela_intervalos, _, intervalos_hist = criar_tabela_intervalo(valores, numero_classes)
         tabela_intervalos = tabela_intervalos.rename(columns={"Frequência": "Frequência absoluta"})
-
     # Tabelas disponíveis. As de intervalos só existem quando há respostas numéricas.
     tabelas = [
         (
@@ -628,6 +663,27 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
             st.dataframe(tabela.round(2), hide_index=True, **LARGURA_TOTAL)
             if legenda:
                 st.caption(legenda)
+         # Histograma: só aparece quando uma tabela por intervalos é escolhida.
+     if tabela_intervalos is not None:
+        config_hist = {"displaylogo": False, "scrollZoom": True}
+
+        if escolha in ("Frequência por intervalos", "Todas as tabelas"):
+            st.markdown("### 📊 Histograma")
+            st.plotly_chart(
+                criar_histograma(tabela_intervalos, intervalos_hist, acumulado=False),
+                config={**config_hist, "toImageButtonOptions": {"format": "png", "filename": f"histograma_{numero}", "scale": 2}},
+                key=f"histograma_{numero}",
+                **LARGURA_TOTAL,
+            )
+
+        if escolha in ("Frequência acumulada por intervalos", "Todas as tabelas"):
+            st.markdown("### 📊 Histograma acumulado")
+            st.plotly_chart(
+                criar_histograma(tabela_intervalos, intervalos_hist, acumulado=True),
+                config={**config_hist, "toImageButtonOptions": {"format": "png", "filename": f"histograma_acumulado_{numero}", "scale": 2}},
+                key=f"histograma_acumulado_{numero}",
+                **LARGURA_TOTAL,
+            )           
 
 
 # ============================================================
