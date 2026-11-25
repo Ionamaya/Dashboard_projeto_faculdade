@@ -570,10 +570,12 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
     1) a medida estatística escolhida e o seu resultado
        (para a moda, também a classificação: unimodal, bimodal, amodal...);
     2) uma caixa para a pessoa escolher qual tabela quer ver;
-    3) a(s) tabela(s) escolhida(s).
+    3) a(s) tabela(s) escolhida(s);
+    4) o histograma, quando a tabela por intervalos é escolhida.
     O número da pergunta (numero) é usado para criar uma caixa de escolha por pergunta.
     """
     tabela_intervalos = None
+    intervalos_hist = None
 
     st.markdown("### 📌 Resultado estatístico")
 
@@ -617,10 +619,10 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
 
     # Se existirem respostas numéricas, a tabela por intervalos também é mostrada
     # (é ela que dá origem à média, mediana e quartis aproximados).
-       intervalos_hist = None
     if len(valores) > 0:
         tabela_intervalos, _, intervalos_hist = criar_tabela_intervalo(valores, numero_classes)
         tabela_intervalos = tabela_intervalos.rename(columns={"Frequência": "Frequência absoluta"})
+
     # Tabelas disponíveis. As de intervalos só existem quando há respostas numéricas.
     tabelas = [
         (
@@ -664,9 +666,6 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
             if legenda:
                 st.caption(legenda)
 
-
-
-    
     # Histograma: só aparece quando uma tabela por intervalos é escolhida.
     if tabela_intervalos is not None:
         config_hist = {"displaylogo": False, "scrollZoom": True}
@@ -687,8 +686,7 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
                 config={**config_hist, "toImageButtonOptions": {"format": "png", "filename": f"histograma_acumulado_{numero}", "scale": 2}},
                 key=f"histograma_acumulado_{numero}",
                 **LARGURA_TOTAL,
-            )           
-
+            )
 
 # ============================================================
 # CONFIGURAÇÃO DA PÁGINA
