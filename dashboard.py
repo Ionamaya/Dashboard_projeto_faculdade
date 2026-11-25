@@ -663,8 +663,12 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
             st.dataframe(tabela.round(2), hide_index=True, **LARGURA_TOTAL)
             if legenda:
                 st.caption(legenda)
-         # Histograma: só aparece quando uma tabela por intervalos é escolhida.
-     if tabela_intervalos is not None:
+
+
+
+    
+    # Histograma: só aparece quando uma tabela por intervalos é escolhida.
+    if tabela_intervalos is not None:
         config_hist = {"displaylogo": False, "scrollZoom": True}
 
         if escolha in ("Frequência por intervalos", "Todas as tabelas"):
