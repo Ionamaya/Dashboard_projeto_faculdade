@@ -5,6 +5,7 @@ import re
 import unicodedata
 from xml.sax.saxutils import escape
 
+import pdfplumber
 import numpy as num
 import pandas as pa
 import plotly.express as px
