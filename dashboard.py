@@ -1144,11 +1144,7 @@ if arquivo is not None:
         texto_mapeamento = st.text_area(
             "Regras de padronização",
             value=(
-                "AP. Goiania=aparecida de goiania\n"
-                "AP Goiania=aparecida de goiania\n"
-                "Aparecida de Goiânia=aparecida de goiania\n"
-                "Aparecida de Goiania=aparecida de goiania\n"
-                "aparecida de goiania=aparecida de goiania\n"
+                
             ),
             height=150,
             key="regras_normalizacao_v2",
