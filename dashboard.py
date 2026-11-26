@@ -1,12 +1,15 @@
 import base64
+import io
 import os
 import re
 import unicodedata
+from xml.sax.saxutils import escape
 
 import numpy as num
 import pandas as pa
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import polars as po
 import streamlit as st
 
@@ -24,7 +27,7 @@ LOGO_MODO_CLARO = "logo_modo_claro.png"
 LOGO_MODO_ESCURO = "logo_modo_escuro.png"
 
 # Aparece embaixo do título, para você conferir qual arquivo está rodando.
-VERSAO_DO_DASHBOARD = "v7"
+VERSAO_DO_DASHBOARD = "v8"
 
 
 def _versao_streamlit():
@@ -146,6 +149,7 @@ def calcular_numero_classes(valores):
         return max(2, min(20, int(num.ceil(1 + 3.322 * num.log10(len(valores))))))
     return 2
 
+
 def abrir_analise(chave):
     """Marca a análise da pergunta como aberta."""
     st.session_state[chave] = True
@@ -154,6 +158,277 @@ def abrir_analise(chave):
 def fechar_analise(chave):
     """Marca a análise da pergunta como fechada (gráfico, medida e tabelas somem)."""
     st.session_state[chave] = False
+
+
+# ============================================================
+# BLOCO 1 — LEITURA DE ARQUIVOS (EXCEL, CSV E PDF)
+# ============================================================
+
+def _converter_colunas_numericas(tabela):
+    """
+    Para CSV e PDF (tudo chega como texto): colunas em que TODAS as respostas
+    são números viram colunas numéricas. Aceita vírgula decimal (2,5).
+    Se todos os números forem inteiros, a coluna fica como inteira (3 e não 3.0).
+    """
+    for coluna in tabela.columns:
+        original = tabela[coluna]
+        preenchidas = int(original.notna().sum())
+        if preenchidas == 0:
+            continue
+        convertida = pa.to_numeric(
+            original.astype("object").map(lambda v: v.replace(",", ".") if isinstance(v, str) else v),
+            errors="coerce",
+        )
+        if int(convertida.notna().sum()) == preenchidas:
+            if (convertida.dropna() % 1 == 0).all():
+                convertida = convertida.astype("Int64")
+            tabela[coluna] = convertida
+    return tabela
+
+
+def _pandas_para_polars(tabela):
+    """Converte um DataFrame do pandas para polars (via listas, sem depender de versões)."""
+    colunas = {}
+    for coluna in tabela.columns:
+        valores = []
+        for v in tabela[coluna].astype("object").tolist():
+            if v is None or pa.isna(v):
+                valores.append(None)
+            elif hasattr(v, "item"):
+                valores.append(v.item())
+            else:
+                valores.append(v)
+        colunas[str(coluna)] = valores
+    return po.DataFrame(colunas)
+
+
+def ler_csv(arquivo):
+    """Lê CSV com separador (, ou ;) e codificação (UTF-8 ou Latin-1) detectados sozinhos."""
+    bruto = arquivo.getvalue()
+    try:
+        texto = bruto.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        texto = bruto.decode("latin-1")
+
+    tabela = pa.read_csv(io.StringIO(texto), sep=None, engine="python", dtype=str)
+    tabela.columns = [str(c).strip() for c in tabela.columns]
+    tabela = _converter_colunas_numericas(tabela)
+    return _pandas_para_polars(tabela)
+
+
+def ler_pdf(arquivo):
+    """
+    Lê TABELAS dentro de um PDF (a primeira linha da tabela vira o cabeçalho).
+    Funciona com PDFs de texto (gerados por Excel, Word, Google Planilhas etc.).
+    PDFs escaneados (foto/imagem) não funcionam.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        raise ValueError("Para ler PDF é preciso instalar a biblioteca pdfplumber (veja o requirements.txt).")
+
+    linhas = []
+    with pdfplumber.open(io.BytesIO(arquivo.getvalue())) as pdf:
+        for pagina in pdf.pages:
+            for tabela_pdf in pagina.extract_tables():
+                for linha in tabela_pdf:
+                    celulas = [
+                        (re.sub(r"\s+", " ", str(c)).strip() or None) if c is not None else None
+                        for c in linha
+                    ]
+                    if any(celulas):
+                        linhas.append(celulas)
+
+    if len(linhas) < 2:
+        raise ValueError(
+            "não encontrei nenhuma tabela dentro do PDF. "
+            "Use um PDF com a tabela de respostas em texto (não escaneado)."
+        )
+
+    cabecalho_bruto = linhas[0]
+    nomes = []
+    for i, nome in enumerate(cabecalho_bruto, start=1):
+        nome = nome or f"Coluna {i}"
+        base, contador = nome, 2
+        while nome in nomes:
+            nome = f"{base} ({contador})"
+            contador += 1
+        nomes.append(nome)
+
+    total = len(nomes)
+    corpo = []
+    for linha in linhas[1:]:
+        if linha == cabecalho_bruto:  # cabeçalho repetido em cada página
+            continue
+        corpo.append((linha + [None] * total)[:total])
+
+    tabela = pa.DataFrame(corpo, columns=nomes)
+    tabela = _converter_colunas_numericas(tabela)
+    return _pandas_para_polars(tabela)
+
+
+def ler_arquivo(arquivo):
+    """Escolhe o leitor certo pela extensão do arquivo enviado."""
+    nome = arquivo.name.lower()
+    arquivo.seek(0)
+
+    if nome.endswith((".xlsx", ".xls")):
+        return po.read_excel(arquivo)
+    if nome.endswith(".csv"):
+        return ler_csv(arquivo)
+    if nome.endswith(".pdf"):
+        return ler_pdf(arquivo)
+    raise ValueError("formato de arquivo não suportado (use Excel, CSV ou PDF).")
+
+
+# ============================================================
+# BLOCO 2 — DOWNLOADS (EXCEL, CSV E PDF)
+# ============================================================
+
+def nome_arquivo_seguro(texto):
+    """Transforma um título em nome de arquivo: 'Frequência por resposta' -> 'frequencia_por_resposta'."""
+    texto = normalizar_texto(str(texto))
+    return re.sub(r"[^a-z0-9]+", "_", texto).strip("_") or "arquivo"
+
+
+def dataframe_para_csv(tabela):
+    """CSV que abre certinho no Excel brasileiro (separador ; e vírgula decimal)."""
+    return tabela.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+
+
+def dataframe_para_excel(tabela, nome_aba="Dados"):
+    """Arquivo .xlsx em memória."""
+    nome_aba = re.sub(r"[\\/*?:\[\]]", "", str(nome_aba))[:31] or "Dados"
+    saida = io.BytesIO()
+    with pa.ExcelWriter(saida, engine="openpyxl") as escritor:
+        tabela.to_excel(escritor, index=False, sheet_name=nome_aba)
+    return saida.getvalue()
+
+
+def _texto_celula_pdf(valor):
+    """Números com vírgula decimal; inteiros sem casas."""
+    if valor is None:
+        return ""
+    try:
+        if pa.isna(valor):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(valor, (bool, num.bool_)):
+        return str(valor)
+    if isinstance(valor, (int, num.integer)):
+        return str(int(valor))
+    if isinstance(valor, (float, num.floating)):
+        return f"{float(valor):.2f}".replace(".", ",")
+    return str(valor)
+
+
+def tabela_para_pdf(tabela, titulo):
+    """PDF (A4 deitado) com a tabela. Retorna os bytes do arquivo."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    saida = io.BytesIO()
+    documento = SimpleDocTemplate(
+        saida,
+        pagesize=landscape(A4),
+        leftMargin=1.5 * cm,
+        rightMargin=1.5 * cm,
+        topMargin=1.5 * cm,
+        bottomMargin=1.5 * cm,
+    )
+    estilos = getSampleStyleSheet()
+    estilo_celula = ParagraphStyle("celula", parent=estilos["BodyText"], fontSize=9, leading=11)
+    estilo_cabecalho = ParagraphStyle(
+        "cabecalho", parent=estilo_celula, textColor=colors.white, fontName="Helvetica-Bold"
+    )
+
+    linhas = [[Paragraph(escape(str(c)), estilo_cabecalho) for c in tabela.columns]]
+    for registro in tabela.itertuples(index=False):
+        linhas.append([Paragraph(escape(_texto_celula_pdf(v)), estilo_celula) for v in registro])
+
+    largura_util = landscape(A4)[0] - 3 * cm
+    colunas = len(tabela.columns)
+    if colunas > 1:
+        primeira = largura_util * 0.34
+        demais = (largura_util - primeira) / (colunas - 1)
+        larguras = [primeira] + [demais] * (colunas - 1)
+    else:
+        larguras = [largura_util]
+
+    tabela_pdf = Table(linhas, colWidths=larguras, repeatRows=1)
+    tabela_pdf.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4e79")),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#b0b0b0")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+
+    documento.build([
+        Paragraph(escape(str(titulo)), estilos["Title"]),
+        Spacer(1, 10),
+        tabela_pdf,
+    ])
+    return saida.getvalue()
+
+
+@st.cache_data(show_spinner=False)
+def figura_para_pdf(figura_json):
+    """
+    PDF do gráfico (precisa da biblioteca kaleido).
+    Retorna (bytes, None) se deu certo ou (None, mensagem_de_erro) se não deu.
+    O resultado fica em cache para não refazer a cada clique.
+    """
+    try:
+        fig = pio.from_json(figura_json)
+        altura = int(fig.layout.height or 500)
+        return fig.to_image(format="pdf", width=1000, height=altura), None
+    except Exception as erro:
+        return None, str(erro)
+
+
+def botoes_download_tabela(tabela, nome, numero, indice):
+    """Três botões embaixo de cada tabela: Excel, CSV e PDF."""
+    base = f"pergunta_{numero}_{nome_arquivo_seguro(nome)}"
+    chave = f"{numero}_{indice}"
+    col_excel, col_csv, col_pdf, _ = st.columns([1, 1, 1, 3])
+
+    with col_excel:
+        try:
+            st.download_button(
+                "⬇️ Excel",
+                data=dataframe_para_excel(tabela, nome),
+                file_name=f"{base}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_xlsx_{chave}",
+            )
+        except Exception as erro:
+            st.caption(f"Excel indisponível: {erro}")
+
+    with col_csv:
+        st.download_button(
+            "⬇️ CSV",
+            data=dataframe_para_csv(tabela),
+            file_name=f"{base}.csv",
+            mime="text/csv",
+            key=f"dl_csv_{chave}",
+        )
+
+    with col_pdf:
+        try:
+            st.download_button(
+                "⬇️ PDF",
+                data=tabela_para_pdf(tabela, nome),
+                file_name=f"{base}.pdf",
+                mime="application/pdf",
+                key=f"dl_pdf_{chave}",
+            )
+        except Exception as erro:
+            st.caption(f"PDF indisponível: {erro}")
+
 
 # ------------------------------------------------------------
 # TABELAS DE FREQUÊNCIA
@@ -523,6 +798,8 @@ def criar_figura(grafico, tabela_grafico, serie_pa, numero_classes):
         legend_title_text="Respostas",
     )
     return fig
+
+
 def criar_histograma(tabela_intervalos, intervalos, acumulado=False):
     """
     Histograma com as barras coladas, uma por intervalo de classe.
@@ -560,19 +837,101 @@ def criar_histograma(tabela_intervalos, intervalos, acumulado=False):
     )
     return fig
 
+
+def dados_do_grafico(grafico, tabela_grafico, serie_pa, numero_classes):
+    """
+    Dados que alimentam o gráfico, para baixar em CSV.
+    Ogiva -> limites e frequências acumuladas | Boxplot -> os valores numéricos |
+    demais gráficos -> a tabela de frequência por resposta.
+    """
+    if grafico == "Ogiva":
+        valores = coverter_numer(serie_pa)
+        if len(valores) >= 2:
+            tabela_ogiva, _, intervalos = criar_tabela_intervalo(valores, numero_classes)
+            acumuladas = tabela_ogiva["Frequência"].cumsum().to_numpy()
+            return pa.DataFrame({
+                "Limite da classe": num.insert(intervalos[1:], 0, intervalos[0]),
+                "Frequência acumulada": num.insert(acumuladas, 0, 0),
+            })
+    elif grafico == "Boxplot":
+        valores = coverter_numer(serie_pa)
+        if len(valores) >= 1:
+            return pa.DataFrame({"Valores": valores.to_numpy()})
+
+    return tabela_grafico.copy()
+
+
+# ============================================================
+# BLOCO 3 — GRÁFICO NA TELA COM BOTÕES DE DOWNLOAD (CSV E PDF)
+# ============================================================
+
+def mostrar_grafico_e_downloads(fig, dados_grafico, nome_base, chave):
+    """Mostra o gráfico e, embaixo dele, os botões de baixar CSV e PDF."""
+    st.plotly_chart(
+        fig,
+        config={
+            "displaylogo": False,
+            "scrollZoom": True,
+            "toImageButtonOptions": {"format": "png", "filename": nome_base, "scale": 2},
+        },
+        key=f"plotly_{chave}",
+        **LARGURA_TOTAL,
+    )
+
+    erro_pdf = None
+    col_csv, col_pdf, _ = st.columns([1, 1, 3])
+
+    with col_csv:
+        st.download_button(
+            "⬇️ Dados do gráfico (CSV)",
+            data=dataframe_para_csv(dados_grafico),
+            file_name=f"{nome_base}.csv",
+            mime="text/csv",
+            key=f"dl_grafico_csv_{chave}",
+        )
+
+    with col_pdf:
+        pdf, erro_pdf = figura_para_pdf(fig.to_json())
+        if pdf is not None:
+            st.download_button(
+                "⬇️ Gráfico (PDF)",
+                data=pdf,
+                file_name=f"{nome_base}.pdf",
+                mime="application/pdf",
+                key=f"dl_grafico_pdf_{chave}",
+            )
+
+    if erro_pdf:
+        st.caption(f"PDF do gráfico indisponível neste servidor ({erro_pdf[:160]}).")
+
+
 # ------------------------------------------------------------
-# RESULTADO ESTATÍSTICO + TABELA DE FREQUÊNCIA
+# RESULTADO ESTATÍSTICO + GRÁFICO + TABELAS DE FREQUÊNCIA
 # ------------------------------------------------------------
 
-def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_frequencia, numero=0):
+def mostrar_resultado_e_tabela(
+    medida,
+    quartil,
+    valores,
+    numero_classes,
+    tabela_frequencia,
+    numero,
+    grafico,
+    tabela_grafico,
+    serie_pa,
+    area_grafico,
+):
     """
-    Mostra, nesta ordem:
-    1) a medida estatística escolhida e o seu resultado
-       (para a moda, também a classificação: unimodal, bimodal, amodal...);
-    2) uma caixa para a pessoa escolher qual tabela quer ver;
-    3) a(s) tabela(s) escolhida(s);
-    4) o histograma, quando a tabela por intervalos é escolhida.
-    O número da pergunta (numero) é usado para criar uma caixa de escolha por pergunta.
+    Mostra, nesta ordem na tela:
+    1) o gráfico (dentro de area_grafico, que fica reservada lá em cima);
+    2) a medida estatística escolhida e o seu resultado;
+    3) uma caixa para escolher qual tabela ver;
+    4) a(s) tabela(s) escolhida(s), cada uma com botões de download.
+
+    O gráfico é decidido DEPOIS da escolha da tabela:
+    - tabela "Frequência por intervalos"            -> Histograma
+    - tabela "Frequência acumulada por intervalos"  -> Histograma acumulado
+    - qualquer outra escolha                        -> o gráfico escolhido no "Tipo de gráfico"
     """
     tabela_intervalos = None
     intervalos_hist = None
@@ -659,34 +1018,39 @@ def mostrar_resultado_e_tabela(medida, quartil, valores, numero_classes, tabela_
         key=f"tabela_{numero}",
     )
 
-    for nome, tabela, legenda in tabelas:
+    # --------------------------------------------------------
+    # GRÁFICO (desenhado na área reservada lá em cima)
+    # --------------------------------------------------------
+    with area_grafico:
+        if escolha in ("Frequência por intervalos", "Frequência acumulada por intervalos"):
+            acumulado = escolha == "Frequência acumulada por intervalos"
+            coluna_frequencia = "Frequência acumulada" if acumulado else "Frequência absoluta"
+            sufixo = "histograma_acumulado" if acumulado else "histograma"
+
+            st.markdown("### 📊 Histograma acumulado" if acumulado else "### 📊 Histograma")
+            fig = criar_histograma(tabela_intervalos, intervalos_hist, acumulado=acumulado)
+            dados = tabela_intervalos[["Intervalo", "Ponto médio", coluna_frequencia]]
+            mostrar_grafico_e_downloads(fig, dados, f"pergunta_{numero}_{sufixo}", f"{numero}_{sufixo}")
+        else:
+            sufixo = nome_arquivo_seguro(grafico)
+
+            st.markdown("### 📈 Gráfico")
+            fig = criar_figura(grafico, tabela_grafico, serie_pa, numero_classes)
+            dados = dados_do_grafico(grafico, tabela_grafico, serie_pa, numero_classes)
+            mostrar_grafico_e_downloads(fig, dados, f"pergunta_{numero}_{sufixo}", f"{numero}_{sufixo}")
+
+    # --------------------------------------------------------
+    # TABELAS (com download em Excel, CSV e PDF)
+    # --------------------------------------------------------
+    for indice, (nome, tabela, legenda) in enumerate(tabelas):
         if escolha in (nome, "Todas as tabelas"):
             st.markdown(f"### 📋 Tabela de {nome.lower()}")
-            st.dataframe(tabela.round(2), hide_index=True, **LARGURA_TOTAL)
+            tabela_arredondada = tabela.round(2)
+            st.dataframe(tabela_arredondada, hide_index=True, **LARGURA_TOTAL)
             if legenda:
                 st.caption(legenda)
+            botoes_download_tabela(tabela_arredondada, nome, numero, indice)
 
-    # Histograma: só aparece quando uma tabela por intervalos é escolhida.
-    if tabela_intervalos is not None:
-        config_hist = {"displaylogo": False, "scrollZoom": True}
-
-        if escolha in ("Frequência por intervalos", "Todas as tabelas"):
-            st.markdown("### 📊 Histograma")
-            st.plotly_chart(
-                criar_histograma(tabela_intervalos, intervalos_hist, acumulado=False),
-                config={**config_hist, "toImageButtonOptions": {"format": "png", "filename": f"histograma_{numero}", "scale": 2}},
-                key=f"histograma_{numero}",
-                **LARGURA_TOTAL,
-            )
-
-        if escolha in ("Frequência acumulada por intervalos", "Todas as tabelas"):
-            st.markdown("### 📊 Histograma acumulado")
-            st.plotly_chart(
-                criar_histograma(tabela_intervalos, intervalos_hist, acumulado=True),
-                config={**config_hist, "toImageButtonOptions": {"format": "png", "filename": f"histograma_acumulado_{numero}", "scale": 2}},
-                key=f"histograma_acumulado_{numero}",
-                **LARGURA_TOTAL,
-            )
 
 # ============================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -707,7 +1071,7 @@ caminho_logo = encontrar_logo(tema_atual())
 if caminho_logo:
     col_titulo, col_logo = st.columns([4, 1])
     with col_titulo:
-        st.title("📊 Dashboard Estatístico - Powered by 創 Inotive") 
+        st.title("📊 Dashboard Estatístico - Powered by 創 Inotive")
     with col_logo:
         st.markdown(logo_em_html(caminho_logo), unsafe_allow_html=True)
 else:
@@ -717,7 +1081,7 @@ else:
 st.caption(f"Versão do dashboard: {VERSAO_DO_DASHBOARD}")
 
 st.write(
-    "Envie o arquivo Excel com as respostas "
+    "Envie o arquivo (Excel, CSV ou PDF) com as respostas "
     "do questionário para realizar as análises."
 )
 
@@ -726,8 +1090,8 @@ st.write(
 # ============================================================
 
 arquivo = st.file_uploader(
-    "📁 Envie aqui o arquivo Excel escolhido para análise",
-    type=["xls", "xlsx"],
+    "📁 Envie aqui o arquivo escolhido para análise (Excel, CSV ou PDF)",
+    type=["xls", "xlsx", "csv", "pdf"],
 )
 
 # ============================================================
@@ -737,7 +1101,7 @@ arquivo = st.file_uploader(
 if arquivo is not None:
 
     try:
-        dados = po.read_excel(arquivo)
+        dados = ler_arquivo(arquivo)
         st.success("✅ Arquivo carregado com sucesso!")
     except Exception as erro:
         st.error(f"❌ Não foi possível ler o arquivo: {erro}")
@@ -846,7 +1210,7 @@ if arquivo is not None:
         # BOTÕES: GERAR E FECHAR A ANÁLISE
         # ----------------------------------------------------
         # O estado fica guardado em session_state. Sem isso, qualquer clique
-        # (inclusive no botão de baixar o PNG) faz a análise sumir da tela.
+        # (inclusive nos botões de download) faz a análise sumir da tela.
 
         chave_analise = f"analise_ativa_{numero}"
 
@@ -872,6 +1236,7 @@ if arquivo is not None:
 
         if not st.session_state.get(chave_analise, False):
             continue
+
         # ----------------------------------------------------
         # PREPARO DOS DADOS
         # ----------------------------------------------------
@@ -892,31 +1257,13 @@ if arquivo is not None:
         tabela_grafico = tabela_frequencia.sort_values(by="Frequência absoluta", ascending=True)
 
         # ----------------------------------------------------
-        # 1) GRÁFICO
+        # GRÁFICO + MEDIDA ESTATÍSTICA + TABELAS DE FREQUÊNCIA
         # ----------------------------------------------------
+        # A área do gráfico é reservada aqui (em cima) e preenchida lá dentro,
+        # depois que a pessoa escolhe a tabela: tabela por intervalos troca o
+        # gráfico escolhido pelo histograma.
 
-        st.markdown("### 📈 Gráfico")
-
-        fig = criar_figura(grafico, tabela_grafico, serie_pa, numero_classes)
-
-        st.plotly_chart(
-            fig,
-            config={
-                "displaylogo": False,
-                "scrollZoom": True,
-                "toImageButtonOptions": {
-                    "format": "png",
-                    "filename": f"grafico_{numero}",
-                    "scale": 2,
-                },
-            },
-            key=f"plotly_{numero}",
-            **LARGURA_TOTAL,
-        )
-
-        # ----------------------------------------------------
-        # 2) MEDIDA ESTATÍSTICA + 3) TABELAS DE FREQUÊNCIA
-        # ----------------------------------------------------
+        area_grafico = st.container()
 
         mostrar_resultado_e_tabela(
             medida,
@@ -925,7 +1272,11 @@ if arquivo is not None:
             numero_classes,
             tabela_frequencia,
             numero,
+            grafico,
+            tabela_grafico,
+            serie_pa,
+            area_grafico,
         )
 
 else:
-    st.info("👆 Envie um arquivo Excel para começar.")
+    st.info("👆 Envie um arquivo para começar (Excel, CSV ou PDF).")
